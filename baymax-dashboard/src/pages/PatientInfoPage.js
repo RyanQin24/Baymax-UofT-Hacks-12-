@@ -2,8 +2,7 @@ import React, { useEffect, useState } from "react";
 import { db } from "../firebase";
 import { doc, setDoc, getDoc } from "firebase/firestore";
 import { useAuth0 } from "@auth0/auth0-react";
-import { connectToContract } from "./blockchain"; // Adjust the path as needed
-
+import { connectToContract } from "./blockchain"; // Adjust path if needed
 
 import {
   Box,
@@ -69,11 +68,18 @@ function PatientInfoPage() {
     fetchPatientData();
   }, [user, isAuthenticated]);
 
+  // >>> UPDATED handleSaveInfo with a timeout fallback <<<
   const handleSaveInfo = async () => {
+    setIsSaving(true);
     try {
-      if (!user) return;
+      if (!user) {
+        setMessage("User not found. Please log in again.");
+        return;
+      }
+
       const userId = user.sub;
-  
+
+      console.log("[Firestore] Saving data...");
       // Save to Firestore
       await setDoc(doc(db, "patients", userId), {
         name,
@@ -81,19 +87,45 @@ function PatientInfoPage() {
         prescriptions,
         issues,
       });
-  
+      console.log("[Firestore] Data saved successfully.");
+
+      console.log("[Blockchain] Connecting to contract...");
       const contract = await connectToContract();
+
       if (contract) {
-        const transaction = await contract.savePatientData(name, age, prescriptions, issues);
-        await transaction.wait(); // Waits for the transaction to be mined
-        console.log("Transaction completed:", transaction);
+        // Set a 30-second timeout in case the user never confirms
+        const timeout = setTimeout(() => {
+          console.warn("[Blockchain] Transaction timed out or user did not confirm.");
+          setMessage("Transaction timed out or user did not confirm.");
+          setIsSaving(false);
+        }, 30000);
+
+        try {
+          console.log("[Blockchain] Sending transaction...");
+          const tx = await contract.savePatientData(name, age, prescriptions, issues);
+          console.log("[Blockchain] Transaction submitted:", tx.hash);
+
+          console.log("[Blockchain] Waiting for confirmation...");
+          await tx.wait();
+          clearTimeout(timeout); // If it succeeds before 30s, stop the timeout
+          console.log("[Blockchain] Transaction confirmed.");
+
+          // At this point, Firestore and Blockchain both succeeded
+          setMessage("Patient info saved to Firestore + Blockchain!");
+        } catch (blockchainErr) {
+          clearTimeout(timeout);
+          console.error("[Blockchain] Transaction error:", blockchainErr);
+          setMessage("Blockchain transaction failed or was rejected.");
+        }
+      } else {
+        console.log("[Blockchain] No contract instance returned.");
+        setMessage("Could not connect to contract. Please check your setup.");
       }
-  
-      console.log("Data saved successfully!");
-      setMessage("Patient information saved successfully!");
     } catch (err) {
-      console.error("Error saving data:", err.message);
+      console.error("[Firestore] Error saving data:", err);
       setMessage("Error saving information: " + err.message);
+    } finally {
+      setIsSaving(false);
     }
   };
 
